@@ -1,0 +1,183 @@
+<script>
+let currentUser = null;
+let appData = {};
+let calendar = null;
+let taskModalInstance = null;
+
+document.addEventListener('DOMContentLoaded', function() {
+  taskModalInstance = new bootstrap.Modal(document.getElementById('taskModal'));
+  
+  // Check LocalStorage Session
+  const savedUser = localStorage.getItem('todo_user');
+  if (savedUser) {
+    currentUser = JSON.parse(savedUser);
+    showApp();
+  }
+});
+
+function handleLogin() {
+  const user = document.getElementById('login-user').value;
+  const pass = document.getElementById('login-pass').value;
+  
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) {
+        currentUser = res.user;
+        localStorage.setItem('todo_user', JSON.stringify(currentUser));
+        showApp();
+      } else {
+        const alertBox = document.getElementById('login-alert');
+        alertBox.innerText = res.message;
+        alertBox.classList.remove('d-none');
+      }
+    })
+    .loginUser(user, pass);
+}
+
+function handleLogout() {
+  localStorage.removeItem('todo_user');
+  currentUser = null;
+  location.reload();
+}
+
+function showApp() {
+  document.getElementById('login-container').classList.add('d-none');
+  document.getElementById('app-container').classList.remove('d-none');
+  loadAppData();
+}
+
+function loadAppData() {
+  google.script.run
+    .withSuccessHandler(data => {
+      appData = data;
+      renderSidebar();
+      renderDashboard();
+      initCalendar();
+      populateCategories();
+    })
+    .getAppData(currentUser.userId);
+}
+
+function renderSidebar() {
+  const menuContainer = document.getElementById('sidebar-menu');
+  menuContainer.innerHTML = '';
+  
+  appData.menus.forEach(menu => {
+    if (menu.IsActive && (menu.TargetRole === 'All' || menu.TargetRole === currentUser.role)) {
+      menuContainer.innerHTML += `
+        <li class="nav-item mb-2">
+          <a href="#" class="nav-link text-white" onclick="switchSection('${menu.TargetUrl}')">
+            <i class="${menu.IconClass} me-2"></i> ${menu.MenuTitle}
+          </a>
+        </li>`;
+    }
+  });
+}
+
+function switchSection(sectionId) {
+  document.querySelectorAll('.content-section').forEach(sec => sec.classList.add('d-none'));
+  document.getElementById(sectionId).classList.remove('d-none');
+  if (sectionId === 'calendar-section' && calendar) {
+    calendar.render();
+  }
+}
+
+function renderDashboard() {
+  const tasks = appData.tasks.filter(t => t.UserID === currentUser.userId);
+  const todayStr = new Date().toISOString().split('T')[0];
+  
+  document.getElementById('count-today').innerText = tasks.filter(t => t.EndDate && t.EndDate.split('T')[0] === todayStr).length;
+  document.getElementById('count-pending').innerText = tasks.filter(t => t.Status === 'Pending').length;
+  document.getElementById('count-completed').innerText = tasks.filter(t => t.Status === 'Done').length;
+  document.getElementById('count-high').innerText = tasks.filter(t => t.Priority === 'High' && t.Status === 'Pending').length;
+}
+
+function initCalendar() {
+  const calendarEl = document.getElementById('calendar');
+  const events = appData.tasks
+    .filter(t => t.UserID === currentUser.userId)
+    .map(t => ({
+      id: t.TaskID,
+      title: t.Title,
+      start: t.EndDate ? t.EndDate.split('T')[0] : t.StartDate,
+      backgroundColor: t.Color || '#0d6efd',
+      extendedProps: { description: t.Description, category: t.Category, priority: t.Priority, dueTime: t.DueTime, status: t.Status }
+    }));
+
+  calendar = new FullCalendar.Calendar(calendarEl, {
+    initialView: 'dayGridMonth',
+    headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,timeGridDay' },
+    events: events,
+    dateClick: function(info) {
+      openTaskModal(null, info.dateStr);
+    },
+    eventClick: function(info) {
+      openTaskModal(info.event);
+    }
+  });
+  calendar.render();
+}
+
+function populateCategories() {
+  const select = document.getElementById('taskCategory');
+  select.innerHTML = '';
+  appData.categories.forEach(cat => {
+    select.innerHTML += `<option value="${cat.CategoryName}">${cat.CategoryName}</option>`;
+  });
+}
+
+function openTaskModal(event = null, dateStr = null) {
+  document.getElementById('taskId').value = event ? event.id : '';
+  document.getElementById('taskTitle').value = event ? event.title : '';
+  document.getElementById('taskDesc').value = event ? event.extendedProps.description : '';
+  document.getElementById('taskPriority').value = event ? event.extendedProps.priority : 'Medium';
+  document.getElementById('taskEndDate').value = event ? event.startStr : (dateStr || new Date().toISOString().split('T')[0]);
+  document.getElementById('taskDueTime').value = event ? event.extendedProps.dueTime : '12:00';
+  document.getElementById('taskColor').value = event ? event.backgroundColor : '#0d6efd';
+  
+  const deleteBtn = document.getElementById('btnDeleteTask');
+  if (event) {
+    document.getElementById('taskModalTitle').innerText = 'Edit Task';
+    deleteBtn.classList.remove('d-none');
+  } else {
+    document.getElementById('taskModalTitle').innerText = 'Add Task';
+    deleteBtn.classList.add('d-none');
+  }
+  taskModalInstance.show();
+}
+
+function onSaveTask() {
+  const taskData = {
+    TaskID: document.getElementById('taskId').value,
+    Title: document.getElementById('taskTitle').value,
+    Description: document.getElementById('taskDesc').value,
+    Category: document.getElementById('taskCategory').value,
+    Priority: document.getElementById('taskPriority').value,
+    StartDate: document.getElementById('taskEndDate').value,
+    EndDate: document.getElementById('taskEndDate').value,
+    DueTime: document.getElementById('taskDueTime').value,
+    Status: 'Pending',
+    Color: document.getElementById('taskColor').value,
+    UserID: currentUser.userId
+  };
+
+  google.script.run
+    .withSuccessHandler(() => {
+      taskModalInstance.hide();
+      loadAppData();
+    })
+    .saveTask(taskData);
+}
+
+function onDeleteTask() {
+  const taskId = document.getElementById('taskId').value;
+  if (confirm('Are you sure you want to delete this task?')) {
+    google.script.run
+      .withSuccessHandler(() => {
+        taskModalInstance.hide();
+        loadAppData();
+      })
+      .deleteTask(taskId, currentUser.userId);
+  }
+}
+</script>
